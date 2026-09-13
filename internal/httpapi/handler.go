@@ -68,6 +68,7 @@ func NewRouter() *gin.Engine {
 	})
 
 	r.POST("/api/v1/verify", handleVerify)
+	r.POST("/api/v1/stability", handleStability)
 	return r
 }
 

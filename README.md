@@ -4,6 +4,9 @@
 计算分布均匀度 DU（Distribution Uniformity of the Low Quarter），并给出唯一裁决。
 即使各测点流量都接近标称值，最低的那一组也能暴露滴头堵塞。
 
+单次验收之后，还可提交 3～10 轮复测做**波动分析**：按测点求各轮中位数与极差占比，
+以最大波动百分比给出整条支路的稳定性结论，避免偶发读数掩盖间歇性堵塞。
+
 - 语言/框架：Go 1.25 + Gin
 - 精确运算：`math/big.Rat`，全程不经过 `float64`
 - 编排：Docker Compose，常驻服务 `api` + 一次性验收服务 `verify`
@@ -246,6 +249,96 @@ HTTP/1.1 422 Unprocessable Entity
 
 请求体不是合法 JSON 对象时返回 400。
 
+### `POST /api/v1/stability`
+
+单次验收之后，工程师提交 **3～10 轮**复测，判断连续测量是否稳定。每轮 **4～64 个**
+测点；首轮确定测点顺序，后续轮次必须包含**完全相同的 id 集合**（轮内唯一，顺序可
+不同，按 id 匹配）；`flow_lph` 的数值规则与裁决接口完全一致。
+
+```bash
+curl -X POST http://localhost:8080/api/v1/stability \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "rounds": [
+      {"measurements": [{"id":"A","flow_lph":9.80},{"id":"B","flow_lph":10.00},
+                        {"id":"C","flow_lph":10.10},{"id":"D","flow_lph":9.90}]},
+      {"measurements": [{"id":"A","flow_lph":9.90},{"id":"B","flow_lph":10.05},
+                        {"id":"C","flow_lph":10.00},{"id":"D","flow_lph":9.85}]},
+      {"measurements": [{"id":"A","flow_lph":9.85},{"id":"B","flow_lph":10.02},
+                        {"id":"C","flow_lph":10.05},{"id":"D","flow_lph":9.95}]}
+    ]
+  }'
+```
+
+计算规则（可复算，全程精确分数，不经过浮点）：
+
+1. 每个测点取各轮流量的**中位数**：奇数轮取中间值；偶数轮取中间两值的均值；
+2. 极差 = 各轮最大值 − 最小值；**波动百分比 = 极差 ÷ 中位数 × 100**；
+3. 百分比**仅在响应展示时**按 ROUND_HALF_UP 保留两位小数，结论始终依据未舍入的
+   精确百分比（例如精确值 5.0025% 展示为 `5.00`，但结论按超过 5% 处理）；
+4. 以所有测点中**最大的精确百分比**形成支路结论；并列时取首轮顺序最前的测点为
+   最差测点：
+
+| 最大精确波动百分比 | `stability` | 中文 `stability_text` |
+|---|---|---|
+| `<= 5%` | `stable` | 稳定 |
+| `> 5%` 且 `<= 10%` | `watch` | 关注 |
+| `> 10%` | `volatile` | 波动 |
+
+成功响应（HTTP 200，测点按首轮顺序列出）：
+
+```json
+{
+  "round_count": 3,
+  "point_count": 4,
+  "points": [
+    {
+      "id": "A",
+      "median_lph": {"decimal": "9.85", "exact_fraction": "197/20", "terminating": true},
+      "range_lph": {"decimal": "0.1", "exact_fraction": "1/10", "terminating": true},
+      "fluctuation_percent": {"rounded": "1.02", "exact_fraction": "200/197"}
+    }
+  ],
+  "worst_point_id": "A",
+  "worst_fluctuation_percent": {"rounded": "1.02", "exact_fraction": "200/197"},
+  "stability": "stable",
+  "stability_text": "稳定"
+}
+```
+
+字段说明：
+
+| 字段 | 含义 |
+|---|---|
+| `round_count` / `point_count` | 轮次数 m（3～10）/ 每轮测点数 n（4～64） |
+| `points[].median_lph` | 该测点各轮流量中位数（`decimal` / `exact_fraction` / `terminating` 契约同裁决接口） |
+| `points[].range_lph` | 该测点各轮极差，同上 |
+| `points[].fluctuation_percent` | 极差占中位数的百分比：`exact_fraction` 为精确值，`rounded` 仅展示 |
+| `worst_point_id` | 精确百分比最大的测点（并列取首轮顺序最前者） |
+| `worst_fluctuation_percent` | 最差测点的百分比，结论由该精确分数得出 |
+| `stability` / `stability_text` | 机器可读结论 / 中文结论 |
+
+仅凭响应即可复算结论：对每个测点 `极差分数 ÷ 中位数分数 × 100` 应等于
+`fluctuation_percent.exact_fraction`，取最大精确分数套用 5% / 10% 阈值即得
+`stability`。
+
+错误响应与裁决接口同一信封：**轮次不足或过多、测点集合不一致、字段非法**均返回
+**HTTP 422** 并定位**首个**出错字段路径，不输出任何部分分析结果：
+
+```json
+{
+  "error": {
+    "message": "point id \"D\" from the first round is missing",
+    "field": "rounds[1].measurements"
+  }
+}
+```
+
+字段路径形如 `rounds`、`rounds[1]`、`rounds[1].measurements`、
+`rounds[0].measurements[2].id`、`rounds[2].measurements[3].flow_lph`。第二轮缺失
+首轮测点（或出现首轮没有的 id）时，定位到该轮的 `measurements` 并在消息中指名
+缺失/多余的具体 id。请求体不是合法 JSON 对象时返回 400。
+
 ### 健康检查
 
 `GET /healthz` → `200 {"status":"ok"}`
@@ -340,13 +433,17 @@ DU 精确等于 `90.005 / 89.995 / 90.00 / 80.00 / 79.99` 时的 ROUND_HALF_UP �
 循环小数均值不提前舍入、非法数量/空 id/重复 id/越界与超精度流量的首个字段定位、
 额定模式下不同额定值改变最低组、并列供给比保持输入次序、循环供给比均值的精确复算、
 `rated_flow_lph` 混用与非法值的首个字段定位，以及旧样例响应逐字段不变。
+复测波动分析另覆盖：奇数/偶数轮中位数、精确百分比在 5% 与 10% 阈值两侧的结论、
+展示舍入不改变结论（精确 5.0025% 判为关注）、并列最差测点取首轮顺序最前者、
+后续轮次乱序按 id 匹配且报告保持首轮顺序、第二轮缺失首轮测点/混入外来 id 的
+精确定位，以及轮次与测点数量边界。
 
 ## 目录结构
 
 ```
 cmd/api/            常驻 HTTP 服务入口（读取 API_PORT）
 cmd/verify/         一次性验收客户端入口
-internal/dripdu/    十进制解析、精确 DU 计算与裁决（核心领域逻辑）
+internal/dripdu/    十进制解析、精确 DU 计算与裁决、复测波动分析（核心领域逻辑）
 internal/httpapi/   Gin 路由、请求校验（首个字段路径）、响应
 internal/verifyclient/ 一次性验收的等待就绪、调用与退出码映射
 examples/           通过/复查/不通过三份请求示例
