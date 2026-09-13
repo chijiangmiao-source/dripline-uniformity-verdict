@@ -72,11 +72,12 @@ func NewRouter() *gin.Engine {
 }
 
 func handleVerify(c *gin.Context) {
-	// 64 points with short ids never approach 1 MiB; this only guards abuse.
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+	// The contract sets no size limit: ids are arbitrary non-empty strings,
+	// so a legitimate request with long ids must still be adjudicated rather
+	// than rejected by a fixed body cap.
 	body, err := c.GetRawData()
 	if err != nil || len(body) == 0 {
-		writeValidationError(c, http.StatusBadRequest, "", "request body must be a non-empty JSON document no larger than 1 MiB")
+		writeValidationError(c, http.StatusBadRequest, "", "request body must be a non-empty JSON document")
 		return
 	}
 

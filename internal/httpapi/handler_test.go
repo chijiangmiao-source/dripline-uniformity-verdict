@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -284,6 +285,87 @@ func TestParseRejectsScientificNotation(t *testing.T) {
 	w := postJSON(t, r, `{"measurements":[{"id":"a","flow_lph":1e1},{"id":"b","flow_lph":10},{"id":"c","flow_lph":10},{"id":"d","flow_lph":10}]}`)
 	require.Equal(t, http.StatusUnprocessableEntity, w.Code, w.Body.String())
 	assert.Equal(t, "measurements[0].flow_lph", decodeBody(t, w)["error"].(map[string]any)["field"])
+}
+
+// TestLeadingZeroNumberLocated pins that a plain number with a leading zero
+// (not valid JSON, but a plain decimal in intent) is rejected by field-level
+// validation — 422 naming the field — rather than failing the whole body as
+// malformed JSON with no location.
+func TestLeadingZeroNumberLocated(t *testing.T) {
+	r := NewRouter()
+	cases := []struct {
+		name        string
+		body        string
+		wantField   string
+		wantMessage string
+	}{
+		{
+			name:        "leading zero flow",
+			body:        `{"measurements":[{"id":"a","flow_lph":10},{"id":"b","flow_lph":01},{"id":"c","flow_lph":10},{"id":"d","flow_lph":10}]}`,
+			wantField:   "measurements[1].flow_lph",
+			wantMessage: "flow_lph must be a decimal number with at most three decimal places",
+		},
+		{
+			name:        "leading zero flow with fraction",
+			body:        `{"measurements":[{"id":"a","flow_lph":007.5},{"id":"b","flow_lph":10},{"id":"c","flow_lph":10},{"id":"d","flow_lph":10}]}`,
+			wantField:   "measurements[0].flow_lph",
+			wantMessage: "flow_lph must be a decimal number with at most three decimal places",
+		},
+		{
+			name:        "leading zero rated flow",
+			body:        `{"measurements":[{"id":"a","flow_lph":10,"rated_flow_lph":8},{"id":"b","flow_lph":10,"rated_flow_lph":08},{"id":"c","flow_lph":10,"rated_flow_lph":8},{"id":"d","flow_lph":10,"rated_flow_lph":8}]}`,
+			wantField:   "measurements[1].rated_flow_lph",
+			wantMessage: "rated_flow_lph must be a decimal number with at most three decimal places",
+		},
+		{
+			name:        "leading zero number as id is a type error",
+			body:        `{"measurements":[{"id":"a","flow_lph":10},{"id":01,"flow_lph":10},{"id":"c","flow_lph":10},{"id":"d","flow_lph":10}]}`,
+			wantField:   "measurements[1].id",
+			wantMessage: "id must be a string",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := postJSON(t, r, tc.body)
+			require.Equal(t, http.StatusUnprocessableEntity, w.Code, w.Body.String())
+			errBody := decodeBody(t, w)["error"].(map[string]any)
+			assert.Equal(t, tc.wantField, errBody["field"])
+			assert.Equal(t, tc.wantMessage, errBody["message"])
+			assert.NotContains(t, decodeBody(t, w), "du_percent")
+		})
+	}
+
+	// Other malformed JSON still fails the whole body as 400 with no field.
+	for _, body := range []string{`01`, `{"measurements":`, `{"measurements":[{"id":"a","flow_lph":1.}]}`, `[1,2,3]`} {
+		w := postJSON(t, r, body)
+		assert.Equal(t, http.StatusBadRequest, w.Code, "body=%s", body)
+	}
+}
+
+// TestVeryLongIDsAccepted pins that the request body has no fixed size cap:
+// four points with very long non-empty unique ids and valid rated data are
+// adjudicated normally.
+func TestVeryLongIDsAccepted(t *testing.T) {
+	r := NewRouter()
+	var b strings.Builder
+	b.WriteString(`{"measurements":[`)
+	for i := 0; i < 4; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		id := strings.Repeat(string(rune('a'+i)), 300*1024)
+		idJSON, _ := json.Marshal(id)
+		fmt.Fprintf(&b, `{"id":%s,"flow_lph":10,"rated_flow_lph":8}`, idJSON)
+	}
+	b.WriteString(`]}`)
+
+	w := postJSON(t, r, b.String())
+	require.Equal(t, http.StatusOK, w.Code, "%.200s", w.Body.String())
+	body := decodeBody(t, w)
+	assert.Equal(t, float64(4), body["sample_count"])
+	assert.Equal(t, "supply_ratio", body["calculation_basis"])
+	assert.Equal(t, "100.00", decimalField(t, body, "du_percent")["rounded"])
+	assert.Equal(t, "pass", body["verdict"])
 }
 
 // parseFraction reads an "num/den" string from the response without importing

@@ -203,6 +203,54 @@ func TestRatedModeMixedPresenceLocated(t *testing.T) {
 	}
 }
 
+// TestRatedModeMixedMissingOutranksLaterViolations pins the document-order
+// rule: the all-or-nothing rated_flow_lph error sits at the first point that
+// omitted the field, so it is reported ahead of any per-measurement violation
+// at a later index — and behind any violation at an earlier index.
+func TestRatedModeMixedMissingOutranksLaterViolations(t *testing.T) {
+	r := NewRouter()
+	cases := []struct {
+		name      string
+		body      string
+		wantField string
+	}{
+		{
+			name:      "first point missing rated beats later invalid flow",
+			body:      `{"measurements":[{"id":"a","flow_lph":10},{"id":"b","flow_lph":0,"rated_flow_lph":8},{"id":"c","flow_lph":10,"rated_flow_lph":8},{"id":"d","flow_lph":10,"rated_flow_lph":8}]}`,
+			wantField: "measurements[0].rated_flow_lph",
+		},
+		{
+			name:      "first point missing rated beats later invalid rated value",
+			body:      `{"measurements":[{"id":"a","flow_lph":10},{"id":"b","flow_lph":10,"rated_flow_lph":0},{"id":"c","flow_lph":10,"rated_flow_lph":8},{"id":"d","flow_lph":10,"rated_flow_lph":8}]}`,
+			wantField: "measurements[0].rated_flow_lph",
+		},
+		{
+			name:      "first point missing rated beats later duplicate id",
+			body:      `{"measurements":[{"id":"a","flow_lph":10},{"id":"b","flow_lph":10,"rated_flow_lph":8},{"id":"b","flow_lph":10,"rated_flow_lph":8},{"id":"d","flow_lph":10,"rated_flow_lph":8}]}`,
+			wantField: "measurements[0].rated_flow_lph",
+		},
+		{
+			name:      "earlier invalid flow beats later missing rated",
+			body:      `{"measurements":[{"id":"a","flow_lph":0,"rated_flow_lph":8},{"id":"b","flow_lph":10},{"id":"c","flow_lph":10,"rated_flow_lph":8},{"id":"d","flow_lph":10,"rated_flow_lph":8}]}`,
+			wantField: "measurements[0].flow_lph",
+		},
+		{
+			name:      "earlier empty id beats later missing rated",
+			body:      `{"measurements":[{"id":"","flow_lph":10,"rated_flow_lph":8},{"id":"b","flow_lph":10},{"id":"c","flow_lph":10,"rated_flow_lph":8},{"id":"d","flow_lph":10,"rated_flow_lph":8}]}`,
+			wantField: "measurements[0].id",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := postJSON(t, r, tc.body)
+			require.Equal(t, http.StatusUnprocessableEntity, w.Code, w.Body.String())
+			errBody := decodeBody(t, w)["error"].(map[string]any)
+			assert.Equal(t, tc.wantField, errBody["field"])
+			assert.NotContains(t, decodeBody(t, w), "du_percent")
+		})
+	}
+}
+
 func TestRatedModeInvalidValuesLocated(t *testing.T) {
 	r := NewRouter()
 	cases := []struct {

@@ -34,12 +34,14 @@ type verifyRequest struct {
 	Measurements []dripdu.Measurement
 }
 
-// parseRequest validates the whole request in document order and returns the
-// first violation found, addressed by a field path such as
-// "measurements[3].flow_lph".
+// parseRequest validates the whole request and returns the first violation in
+// document order, addressed by a field path such as
+// "measurements[3].flow_lph". The all-or-nothing rated_flow_lph rule counts as
+// a violation located at the first measurement that omitted the field, so it
+// outranks any per-measurement error sitting at a later point.
 func parseRequest(body []byte) (verifyRequest, *validationError) {
-	var root map[string]json.RawMessage
-	if err := json.Unmarshal(body, &root); err != nil || root == nil {
+	root, err := parseJSONObject(body)
+	if err != nil || root == nil {
 		return verifyRequest{}, syntaxError("request body must be a JSON object")
 	}
 
@@ -51,8 +53,8 @@ func parseRequest(body []byte) (verifyRequest, *validationError) {
 		}
 	}
 
-	var rawList []json.RawMessage
-	if err := json.Unmarshal(rawItems, &rawList); err != nil {
+	rawList, err := parseJSONArray(rawItems)
+	if err != nil {
 		return verifyRequest{}, &validationError{
 			Field:   "measurements",
 			Message: "measurements must be an array",
@@ -71,36 +73,56 @@ func parseRequest(body []byte) (verifyRequest, *validationError) {
 	points := make([]dripdu.Measurement, 0, n)
 	anyRated := false
 	firstMissingRated := -1
+	// firstErr is the earliest per-measurement violation and firstErrIdx its
+	// measurement index. The scan never stops at it: whether the request is
+	// mixed (some points rated, some not) only becomes known after the last
+	// measurement, and the mixed error may sit at an earlier index.
+	var firstErr *validationError
+	firstErrIdx := -1
+	record := func(i int, verr *validationError) {
+		if firstErr == nil {
+			firstErr = verr
+			firstErrIdx = i
+		}
+	}
 
 	for i, raw := range rawList {
 		itemPath := fmt.Sprintf("measurements[%d]", i)
 
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
-			return verifyRequest{}, &validationError{
+		fields, err := parseJSONObject(raw)
+		if err != nil || fields == nil {
+			record(i, &validationError{
 				Field:   itemPath,
 				Message: "measurement must be a JSON object",
-			}
+			})
+			continue
+		}
+
+		// Presence of rated_flow_lph is a syntactic property of the item and
+		// feeds the all-or-nothing rule even when another field of the same
+		// measurement is invalid.
+		if _, present := fields["rated_flow_lph"]; present {
+			anyRated = true
+		} else if firstMissingRated < 0 {
+			firstMissingRated = i
 		}
 
 		id, verr := parseID(fields["id"], seenIDs, itemPath+".id")
 		if verr != nil {
-			return verifyRequest{}, verr
+			record(i, verr)
+			continue
 		}
 
 		flow, verr := parseFlowField(fields["flow_lph"], itemPath+".flow_lph")
 		if verr != nil {
-			return verifyRequest{}, verr
+			record(i, verr)
+			continue
 		}
 
-		rated, hasRated, verr := parseRatedFlowField(fields, itemPath+".rated_flow_lph")
+		rated, _, verr := parseRatedFlowField(fields, itemPath+".rated_flow_lph")
 		if verr != nil {
-			return verifyRequest{}, verr
-		}
-		if hasRated {
-			anyRated = true
-		} else if firstMissingRated < 0 {
-			firstMissingRated = i
+			record(i, verr)
+			continue
 		}
 
 		points = append(points, dripdu.Measurement{ID: id, Flow: flow, Rated: rated})
@@ -108,12 +130,18 @@ func parseRequest(body []byte) (verifyRequest, *validationError) {
 
 	// rated_flow_lph is all-or-nothing across one request. In a mixed
 	// request the points without the field are the omissions, so the error
-	// locates the first of them — never a point that duly carried it.
-	if anyRated && firstMissingRated >= 0 {
+	// locates the first of them — never a point that duly carried it. That
+	// position precedes any per-measurement error at a later index (for
+	// example an illegal flow on a subsequent point), which is then withheld
+	// in favour of the earlier violation.
+	if anyRated && firstMissingRated >= 0 && (firstErr == nil || firstMissingRated < firstErrIdx) {
 		return verifyRequest{}, &validationError{
 			Field:   fmt.Sprintf("measurements[%d].rated_flow_lph", firstMissingRated),
 			Message: "rated_flow_lph must be provided for every measurement or omitted for all",
 		}
+	}
+	if firstErr != nil {
+		return verifyRequest{}, firstErr
 	}
 
 	return verifyRequest{Measurements: points}, nil
