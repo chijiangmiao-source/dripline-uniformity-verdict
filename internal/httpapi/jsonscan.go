@@ -3,12 +3,24 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 // errJSONSyntax marks a structurally invalid JSON document. It carries no
 // detail on purpose: callers map it to the same generic 400 the standard
 // library decoder used to produce.
 var errJSONSyntax = errors.New("invalid JSON document")
+
+// duplicateFieldError reports that one object repeated a member name; key is
+// the first name seen twice. It is only produced for the object levels the
+// request contract unpacks — values kept as raw text keep encoding/json's
+// last-wins behaviour. The body is syntactically valid JSON, so callers map
+// it to a located 422 (the repeated field) rather than a generic 400.
+type duplicateFieldError struct{ key string }
+
+func (e *duplicateFieldError) Error() string {
+	return fmt.Sprintf("duplicate object member %q", e.key)
+}
 
 // The scanner below accepts exactly one extension over strict JSON: number
 // tokens may carry leading zeros (e.g. 01). A flow submitted that way is not
@@ -19,8 +31,11 @@ var errJSONSyntax = errors.New("invalid JSON document")
 // grammar exactly, mirroring encoding/json.
 
 // parseJSONObject parses raw as a JSON object and returns each member's raw
-// value, mirroring json.Unmarshal into map[string]json.RawMessage — including
-// the null literal decoding to a nil map without error.
+// value. The null literal decodes to a nil map without error, mirroring
+// json.Unmarshal into map[string]json.RawMessage. One behaviour diverges from
+// encoding/json on purpose: a repeated member name is rejected with a
+// duplicateFieldError, because the contract reads members at this level and
+// last-wins would silently discard one of the two values.
 func parseJSONObject(raw []byte) (map[string]json.RawMessage, error) {
 	s := &jsonScanner{data: raw}
 	s.skipSpace()
@@ -39,7 +54,7 @@ func parseJSONObject(raw []byte) (map[string]json.RawMessage, error) {
 	if s.data[s.off] != '{' {
 		return nil, errJSONSyntax
 	}
-	members, err := s.object()
+	members, err := s.strictObject()
 	if err != nil {
 		return nil, err
 	}
@@ -146,6 +161,17 @@ func (s *jsonScanner) value() (json.RawMessage, error) {
 }
 
 func (s *jsonScanner) object() (map[string]json.RawMessage, error) {
+	return s.parseObject(false)
+}
+
+// strictObject parses one object like object but rejects a repeated member
+// name with a duplicateFieldError. Only the levels the contract unpacks use
+// it; nested objects reached through value stay permissive.
+func (s *jsonScanner) strictObject() (map[string]json.RawMessage, error) {
+	return s.parseObject(true)
+}
+
+func (s *jsonScanner) parseObject(rejectDups bool) (map[string]json.RawMessage, error) {
 	s.depth++
 	if s.depth > maxJSONDepth {
 		return nil, errJSONSyntax
@@ -182,6 +208,11 @@ func (s *jsonScanner) object() (map[string]json.RawMessage, error) {
 		val, err := s.value()
 		if err != nil {
 			return nil, err
+		}
+		if rejectDups {
+			if _, repeated := members[key]; repeated {
+				return nil, &duplicateFieldError{key: key}
+			}
 		}
 		members[key] = val
 		s.skipSpace()

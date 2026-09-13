@@ -374,6 +374,29 @@ func TestStabilityFieldPathPointsAtFirstViolation(t *testing.T) {
 			),
 			wantField: "rounds[0].measurements[1].flow_lph",
 		},
+		{
+			name: "repeated rounds array rejected as ambiguous",
+			body: `{"rounds":[{"measurements":[{"id":"A","flow_lph":10},{"id":"B","flow_lph":10},{"id":"C","flow_lph":10},{"id":"D","flow_lph":10}]}],` +
+				`"rounds":[{"measurements":[{"id":"A","flow_lph":10},{"id":"B","flow_lph":10},{"id":"C","flow_lph":10},{"id":"D","flow_lph":10}]}]}`,
+			wantField: "rounds",
+		},
+		{
+			name: "repeated measurements in one round",
+			body: `{"rounds":[` +
+				`{"measurements":[{"id":"A","flow_lph":10},{"id":"B","flow_lph":10},{"id":"C","flow_lph":10},{"id":"D","flow_lph":10}],` +
+				`"measurements":[{"id":"A","flow_lph":10},{"id":"B","flow_lph":10},{"id":"C","flow_lph":10},{"id":"D","flow_lph":10}]},` +
+				`{"measurements":[{"id":"A","flow_lph":10},{"id":"B","flow_lph":10},{"id":"C","flow_lph":10},{"id":"D","flow_lph":10}]},` +
+				`{"measurements":[{"id":"A","flow_lph":10},{"id":"B","flow_lph":10},{"id":"C","flow_lph":10},{"id":"D","flow_lph":10}]}]}`,
+			wantField: "rounds[0].measurements",
+		},
+		{
+			name: "repeated flow_lph in one point",
+			body: `{"rounds":[` +
+				`{"measurements":[{"id":"A","flow_lph":10},{"id":"B","flow_lph":0,"flow_lph":10},{"id":"C","flow_lph":10},{"id":"D","flow_lph":10}]},` +
+				`{"measurements":[{"id":"A","flow_lph":10},{"id":"B","flow_lph":10},{"id":"C","flow_lph":10},{"id":"D","flow_lph":10}]},` +
+				`{"measurements":[{"id":"A","flow_lph":10},{"id":"B","flow_lph":10},{"id":"C","flow_lph":10},{"id":"D","flow_lph":10}]}]}`,
+			wantField: "rounds[0].measurements[1].flow_lph",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

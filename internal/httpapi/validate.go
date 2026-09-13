@@ -3,6 +3,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -24,6 +25,32 @@ func syntaxError(message string) *validationError {
 	return &validationError{Message: message, badRequest: true}
 }
 
+// asDuplicateField reports whether err is the scanner's repeated-member
+// rejection and, if so, which key was repeated.
+func asDuplicateField(err error) (*duplicateFieldError, bool) {
+	var dup *duplicateFieldError
+	if errors.As(err, &dup) {
+		return dup, true
+	}
+	return nil, false
+}
+
+// duplicateFieldViolation maps a repeated member name to the validation
+// envelope: the body is syntactically valid JSON, so keeping only one of the
+// two values would silently answer a different request than the one sent.
+// The ambiguity is reported as a 422 located at the repeated field, like any
+// other semantic violation.
+func duplicateFieldViolation(basePath string, dup *duplicateFieldError) *validationError {
+	field := dup.key
+	if basePath != "" {
+		field = basePath + "." + dup.key
+	}
+	return &validationError{
+		Field:   field,
+		Message: fmt.Sprintf("%s is duplicated", dup.key),
+	}
+}
+
 // verifyRequest is the accepted request shape:
 //
 //	{ "measurements": [ {"id": "p1", "flow_lph": 12.34}, ... ] }
@@ -41,7 +68,15 @@ type verifyRequest struct {
 // outranks any per-measurement error sitting at a later point.
 func parseRequest(body []byte) (verifyRequest, *validationError) {
 	root, err := parseJSONObject(body)
-	if err != nil || root == nil {
+	if err != nil {
+		if dup, ok := asDuplicateField(err); ok {
+			// Two measurements arrays (or any repeated root member) make the
+			// request ambiguous: reject rather than pick one silently.
+			return verifyRequest{}, duplicateFieldViolation("", dup)
+		}
+		return verifyRequest{}, syntaxError("request body must be a JSON object")
+	}
+	if root == nil {
 		return verifyRequest{}, syntaxError("request body must be a JSON object")
 	}
 
@@ -90,7 +125,21 @@ func parseRequest(body []byte) (verifyRequest, *validationError) {
 		itemPath := fmt.Sprintf("measurements[%d]", i)
 
 		fields, err := parseJSONObject(raw)
-		if err != nil || fields == nil {
+		if err != nil {
+			if dup, ok := asDuplicateField(err); ok {
+				// A repeated field inside one measurement (e.g. an invalid
+				// flow_lph followed by a valid one) is rejected at that
+				// field instead of silently keeping the later value.
+				record(i, duplicateFieldViolation(itemPath, dup))
+			} else {
+				record(i, &validationError{
+					Field:   itemPath,
+					Message: "measurement must be a JSON object",
+				})
+			}
+			continue
+		}
+		if fields == nil {
 			record(i, &validationError{
 				Field:   itemPath,
 				Message: "measurement must be a JSON object",

@@ -108,7 +108,13 @@ func handleStability(c *gin.Context) {
 // is located at that round's measurements array.
 func parseStabilityRequest(body []byte) (stabilityRequest, *validationError) {
 	root, err := parseJSONObject(body)
-	if err != nil || root == nil {
+	if err != nil {
+		if dup, ok := asDuplicateField(err); ok {
+			return stabilityRequest{}, duplicateFieldViolation("", dup)
+		}
+		return stabilityRequest{}, syntaxError("request body must be a JSON object")
+	}
+	if root == nil {
 		return stabilityRequest{}, syntaxError("request body must be a JSON object")
 	}
 
@@ -143,7 +149,16 @@ func parseStabilityRequest(body []byte) (stabilityRequest, *validationError) {
 		roundPath := fmt.Sprintf("rounds[%d]", i)
 
 		fields, err := parseJSONObject(raw)
-		if err != nil || fields == nil {
+		if err != nil {
+			if dup, ok := asDuplicateField(err); ok {
+				return stabilityRequest{}, duplicateFieldViolation(roundPath, dup)
+			}
+			return stabilityRequest{}, &validationError{
+				Field:   roundPath,
+				Message: "round must be a JSON object",
+			}
+		}
+		if fields == nil {
 			return stabilityRequest{}, &validationError{
 				Field:   roundPath,
 				Message: "round must be a JSON object",
@@ -177,7 +192,16 @@ func parseStabilityRequest(body []byte) (stabilityRequest, *validationError) {
 			itemPath := fmt.Sprintf("%s.measurements[%d]", roundPath, j)
 
 			itemFields, err := parseJSONObject(rawItem)
-			if err != nil || itemFields == nil {
+			if err != nil {
+				if dup, ok := asDuplicateField(err); ok {
+					return stabilityRequest{}, duplicateFieldViolation(itemPath, dup)
+				}
+				return stabilityRequest{}, &validationError{
+					Field:   itemPath,
+					Message: "measurement must be a JSON object",
+				}
+			}
+			if itemFields == nil {
 				return stabilityRequest{}, &validationError{
 					Field:   itemPath,
 					Message: "measurement must be a JSON object",

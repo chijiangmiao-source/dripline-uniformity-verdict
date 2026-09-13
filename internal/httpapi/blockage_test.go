@@ -261,6 +261,55 @@ func TestBlockageErrorsReuseVerifyEnvelopeAndFirstField(t *testing.T) {
 	}
 }
 
+// TestBlockageRejectsDuplicateFields pins that a request whose JSON repeats a
+// member name is rejected as ambiguous instead of silently keeping only the
+// later value: two measurements arrays must not resolve to the second one, an
+// invalid flow_lph must not be erased by a repeated valid one, and an invalid
+// rated_flow_lph must not be erased either.
+func TestBlockageRejectsDuplicateFields(t *testing.T) {
+	r := NewRouter()
+	cases := []struct {
+		name      string
+		body      string
+		wantField string
+	}{
+		{
+			name: "two measurements arrays rejected as ambiguous",
+			body: `{"measurements":[{"id":"a","flow_lph":8},{"id":"b","flow_lph":8},{"id":"c","flow_lph":10},{"id":"d","flow_lph":10}],` +
+				`"measurements":[{"id":"a","flow_lph":10},{"id":"b","flow_lph":10},{"id":"c","flow_lph":10},{"id":"d","flow_lph":10}]}`,
+			wantField: "measurements",
+		},
+		{
+			name:      "invalid then valid flow_lph located at the point",
+			body:      `{"measurements":[{"id":"a","flow_lph":10},{"id":"b","flow_lph":0,"flow_lph":10},{"id":"c","flow_lph":10},{"id":"d","flow_lph":10}]}`,
+			wantField: "measurements[1].flow_lph",
+		},
+		{
+			name:      "invalid then valid rated_flow_lph located at the point",
+			body:      `{"measurements":[{"id":"a","flow_lph":10,"rated_flow_lph":8},{"id":"b","flow_lph":10,"rated_flow_lph":0,"rated_flow_lph":8},{"id":"c","flow_lph":10,"rated_flow_lph":8},{"id":"d","flow_lph":10,"rated_flow_lph":8}]}`,
+			wantField: "measurements[1].rated_flow_lph",
+		},
+		{
+			name:      "repeated id located at the point",
+			body:      `{"measurements":[{"id":"a","flow_lph":10},{"id":"b","id":"c","flow_lph":10},{"id":"c","flow_lph":10},{"id":"d","flow_lph":10}]}`,
+			wantField: "measurements[1].id",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := postBlockage(t, r, tc.body)
+			require.Equal(t, http.StatusUnprocessableEntity, w.Code, w.Body.String())
+			errBody := decodeBody(t, w)["error"].(map[string]any)
+			assert.Equal(t, tc.wantField, errBody["field"])
+			// No partial diagnosis leaks alongside the error.
+			full := decodeBody(t, w)
+			assert.NotContains(t, full, "sections")
+			assert.NotContains(t, full, "points")
+			assert.NotContains(t, full, "median")
+		})
+	}
+}
+
 // TestBlockageDoesNotChangeExistingEndpoints pins compatibility: adding the
 // diagnosis route leaves the verify and stability routes registered and
 // answering.

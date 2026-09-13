@@ -225,6 +225,21 @@ func TestVerifyFieldPathPointsAtFirstViolation(t *testing.T) {
 			body:      `{"measurements":[{"id":"a"},{"id":"b","flow_lph":10},{"id":"c","flow_lph":10},{"id":"d","flow_lph":10}]}`,
 			wantField: "measurements[0].flow_lph",
 		},
+		{
+			name:      "repeated measurements array rejected as ambiguous",
+			body:      `{"measurements":[{"id":"a","flow_lph":8},{"id":"b","flow_lph":8},{"id":"c","flow_lph":10},{"id":"d","flow_lph":10}],"measurements":[{"id":"a","flow_lph":10},{"id":"b","flow_lph":10},{"id":"c","flow_lph":10},{"id":"d","flow_lph":10}]}`,
+			wantField: "measurements",
+		},
+		{
+			name:      "repeated flow_lph located at the point",
+			body:      `{"measurements":[{"id":"a","flow_lph":10},{"id":"b","flow_lph":0,"flow_lph":10},{"id":"c","flow_lph":10},{"id":"d","flow_lph":10}]}`,
+			wantField: "measurements[1].flow_lph",
+		},
+		{
+			name:      "repeated rated_flow_lph located at the point",
+			body:      `{"measurements":[{"id":"a","flow_lph":10,"rated_flow_lph":8},{"id":"b","flow_lph":10,"rated_flow_lph":0,"rated_flow_lph":8},{"id":"c","flow_lph":10,"rated_flow_lph":8},{"id":"d","flow_lph":10,"rated_flow_lph":8}]}`,
+			wantField: "measurements[1].rated_flow_lph",
+		},
 	}
 
 	for _, tc := range cases {

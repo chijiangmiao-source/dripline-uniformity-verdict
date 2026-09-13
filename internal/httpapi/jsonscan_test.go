@@ -10,10 +10,12 @@ import (
 )
 
 // TestJSONScannerMatchesEncodingJson feeds a corpus of documents — none of
-// them containing leading-zero numbers — through both parseJSONObject and
-// encoding/json, and pins that the two agree on acceptance and produce the
-// same members. The only documents where the scanner may diverge are the
-// leading-zero forms covered by TestJSONScannerToleratesLeadingZeros.
+// them containing leading-zero numbers or repeated member names — through
+// both parseJSONObject and encoding/json, and pins that the two agree on
+// acceptance and produce the same members. The only documents where the
+// scanner may diverge are the leading-zero forms covered by
+// TestJSONScannerToleratesLeadingZeros and the repeated-member forms covered
+// by TestJSONScannerRejectsDuplicateMembers.
 func TestJSONScannerMatchesEncodingJson(t *testing.T) {
 	docs := []string{
 		// Valid documents.
@@ -26,7 +28,6 @@ func TestJSONScannerMatchesEncodingJson(t *testing.T) {
 		`{"a":""}`,
 		`{"a":0,"b":-0,"c":0.5,"d":10,"e":1e3,"f":1E+3,"g":1.5e-3,"h":100.001}`,
 		`{"a":[[]],"b":{}}`,
-		`{"a":1,"a":2}`,
 		`{"䁥bc":[]}`,
 		`{"a":-0.5}`,
 		// Null decodes to a nil map without error, like encoding/json.
@@ -99,6 +100,39 @@ func TestJSONScannerMatchesEncodingJson(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestJSONScannerRejectsDuplicateMembers pins the second deliberate
+// divergence from encoding/json: at the object levels the contract unpacks,
+// a repeated member name is rejected naming the first repeated key, instead
+// of silently keeping only the last value. Repetitions inside nested values
+// that no contract level reads stay raw and keep last-wins behaviour.
+func TestJSONScannerRejectsDuplicateMembers(t *testing.T) {
+	docs := []struct {
+		doc     string
+		wantKey string
+	}{
+		{`{"a":1,"a":2}`, "a"},
+		{`{"a":1,"b":2,"a":3}`, "a"},
+		{`{"id":"x","id":"y"}`, "id"},
+	}
+	for _, tc := range docs {
+		t.Run(tc.doc, func(t *testing.T) {
+			var std map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal([]byte(tc.doc), &std), "encoding/json tolerates %q", tc.doc)
+
+			_, err := parseJSONObject([]byte(tc.doc))
+			var dup *duplicateFieldError
+			require.ErrorAs(t, err, &dup, "scanner must reject the repeated member in %q", tc.doc)
+			assert.Equal(t, tc.wantKey, dup.key, "repeated key of %q", tc.doc)
+		})
+	}
+
+	// A duplicate inside a nested value the contract never unpacks is not the
+	// scanner's concern: the raw text is kept as-is.
+	got, err := parseJSONObject([]byte(`{"a":{"x":1,"x":2}}`))
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"x":1,"x":2}`, string(got["a"]))
 }
 
 // TestJSONScannerToleratesLeadingZeros pins the single extension over strict
