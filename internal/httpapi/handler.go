@@ -1,24 +1,43 @@
 package httpapi
 
 import (
+	"math/big"
 	"net/http"
 
 	"github.com/example/drip-du/internal/dripdu"
 	"github.com/gin-gonic/gin"
 )
 
+// decimalView carries one exact rational value two ways: ExactFraction
+// ("num/den") is authoritative and always enough to recompute the verdict;
+// Decimal is a human-readable rendering. Terminating reports whether Decimal
+// equals the fraction exactly (true) or is only a 12-place preview (false).
+type decimalView struct {
+	Decimal       string `json:"decimal"`
+	ExactFraction string `json:"exact_fraction"`
+	Terminating   bool   `json:"terminating"`
+}
+
+// duView carries DU both as the unrounded exact fraction and as the only
+// rounded value in the whole response (ROUND_HALF_UP, two decimal places).
+type duView struct {
+	Rounded       string `json:"rounded"`
+	ExactFraction string `json:"exact_fraction"`
+}
+
 // verifyResponse is the adjudication returned for one valid request. Every
-// numeric field is rendered as a string so exact decimal values survive JSON
-// transport without any float64 interpretation.
+// numeric result includes its exact rational fraction, so the DU and verdict
+// can be recomputed from this document alone even when a mean is a repeating
+// decimal (e.g. seven measurements divided by 7).
 type verifyResponse struct {
-	SampleCount int      `json:"sample_count"`
-	LowestCount int      `json:"lowest_count"`
-	LowestIDs   []string `json:"lowest_ids"`
-	LowestMean  string   `json:"lowest_mean_lph"`
-	OverallMean string   `json:"overall_mean_lph"`
-	DU          string   `json:"du_percent"`
-	Verdict     string   `json:"verdict"`
-	VerdictText string   `json:"verdict_text"`
+	SampleCount int         `json:"sample_count"`
+	LowestCount int         `json:"lowest_count"`
+	LowestIDs   []string    `json:"lowest_ids"`
+	LowestMean  decimalView `json:"lowest_mean_lph"`
+	OverallMean decimalView `json:"overall_mean_lph"`
+	DU          duView      `json:"du_percent"`
+	Verdict     string      `json:"verdict"`
+	VerdictText string      `json:"verdict_text"`
 }
 
 // errorResponse is returned with 4xx/5xx statuses.
@@ -73,12 +92,24 @@ func handleVerify(c *gin.Context) {
 		SampleCount: result.SampleCount,
 		LowestCount: result.LowestCount,
 		LowestIDs:   result.LowestIDs,
-		LowestMean:  dripdu.MeanString(result.LowestMean),
-		OverallMean: dripdu.MeanString(result.OverallMean),
-		DU:          result.DURounded,
+		LowestMean:  toDecimalView(result.LowestMean),
+		OverallMean: toDecimalView(result.OverallMean),
+		DU: duView{
+			Rounded:       result.DURounded,
+			ExactFraction: result.DU.Num().String() + "/" + result.DU.Denom().String(),
+		},
 		Verdict:     string(result.Verdict),
 		VerdictText: verdictText(result.Verdict),
 	})
+}
+
+func toDecimalView(r *big.Rat) decimalView {
+	v := dripdu.AsExactDecimal(r)
+	return decimalView{
+		Decimal:       v.Decimal,
+		ExactFraction: v.Fraction,
+		Terminating:   v.Terminating,
+	}
 }
 
 func writeValidationError(c *gin.Context, status int, field, message string) {

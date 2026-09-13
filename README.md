@@ -70,9 +70,20 @@ curl -X POST http://localhost:8080/api/v1/verify \
   "sample_count": 8,
   "lowest_count": 2,
   "lowest_ids": ["A-01", "A-07"],
-  "lowest_mean_lph": "9.85",
-  "overall_mean_lph": "9.965",
-  "du_percent": "98.85",
+  "lowest_mean_lph": {
+    "decimal": "9.85",
+    "exact_fraction": "197/20",
+    "terminating": true
+  },
+  "overall_mean_lph": {
+    "decimal": "9.965",
+    "exact_fraction": "1993/200",
+    "terminating": true
+  },
+  "du_percent": {
+    "rounded": "98.85",
+    "exact_fraction": "197000/1993"
+  },
   "verdict": "pass",
   "verdict_text": "通过"
 }
@@ -85,10 +96,41 @@ curl -X POST http://localhost:8080/api/v1/verify \
 | `sample_count` | 样本数 n |
 | `lowest_count` | 最低组数量 `ceil(n/4)` |
 | `lowest_ids` | 最低组测点 id（按流量升序、并列按输入次序） |
-| `lowest_mean_lph` | 最低组均值，**未提前舍入**；有限小数原样输出，无限循环小数保留 12 位仅供传输（DU 始终由精确分数计算，不使用此文本） |
+| `lowest_mean_lph` | 最低组均值，**未提前舍入**（见下方精确值对象） |
 | `overall_mean_lph` | 全体均值，同上 |
-| `du_percent` | 最终 DU，ROUND_HALF_UP 后固定两位小数 |
+| `du_percent.rounded` | 最终 DU，全响应唯一被舍入的值，ROUND_HALF_UP 后固定两位小数 |
+| `du_percent.exact_fraction` | 未提前舍入的精确 DU 分数 `num/den` |
 | `verdict` / `verdict_text` | 机器可读裁决 / 中文裁决 |
+
+**精确值对象（`*_lph`）三字段：**
+
+- `exact_fraction`：权威值，既约分数 `num/den`，携带全部精度。
+- `decimal`：便于人读的十进制文本。
+- `terminating`：`true` 表示该均值是有限小数，`decimal` 与分数**完全相等**；
+  `false` 表示是循环小数，`decimal` 只是 12 位 ROUND_HALF_UP 预览，
+  **复算必须使用 `exact_fraction`**。
+
+### 仅凭响应精确复算（含循环小数）
+
+均值分母可能含 2、5 以外的质因子（例如 7 个测点除以 7），此时十进制写不尽。
+响应始终附精确分数，验收方无需访问服务端即可独立复算，例如 7 测点（一个
+`99.999`、六个 `100`）：
+
+```json
+"lowest_mean_lph":  { "decimal": "99.9995",          "exact_fraction": "199999/2000", "terminating": true  },
+"overall_mean_lph": { "decimal": "99.999857142857",  "exact_fraction": "699999/7000",  "terminating": false },
+"du_percent":       { "rounded": "100.00",            "exact_fraction": "69999650/699999" }
+```
+
+复算（全程分数运算，最后才四舍五入）：
+
+```
+DU = (199999/2000) ÷ (699999/7000) × 100 = 69999650/699999
+   → ROUND_HALF_UP 两位 = 100.00 → pass
+```
+
+可见 `overall_mean_lph.decimal` 的 12 位只是展示，真正参与复算的是
+`exact_fraction`，因此临界支路不会因均值被截断而产生二义结论。
 
 ### 错误响应
 
@@ -186,7 +228,7 @@ cat my-branch.json | docker compose run --rm -T \
 curl -s -X POST http://localhost:8080/api/v1/verify \
   -H 'Content-Type: application/json' \
   --data @examples/acceptance-fail.json
-# ... "du_percent":"66.64","verdict":"fail","verdict_text":"不通过"
+# ... "du_percent": {"rounded":"66.64", ...}, "verdict":"fail","verdict_text":"不通过"
 ```
 
 ---

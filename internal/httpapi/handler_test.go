@@ -3,8 +3,10 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -56,6 +58,13 @@ func validBody(flows []string, ids ...string) string {
 	return buf.String()
 }
 
+func decimalField(t *testing.T, body map[string]any, key string) map[string]any {
+	t.Helper()
+	v, ok := body[key].(map[string]any)
+	require.True(t, ok, "field %s is not an object: %v", key, body[key])
+	return v
+}
+
 func TestVerifyHappyPathAllPass(t *testing.T) {
 	r := NewRouter()
 	w := postJSON(t, r, validBody([]string{"9.8", "9.9", "10.0", "10.1"}))
@@ -65,10 +74,23 @@ func TestVerifyHappyPathAllPass(t *testing.T) {
 	assert.Equal(t, float64(4), body["sample_count"])
 	assert.Equal(t, float64(1), body["lowest_count"])
 	assert.Equal(t, []any{"pa"}, body["lowest_ids"])
-	assert.Equal(t, "9.8", body["lowest_mean_lph"])
-	assert.Equal(t, "9.95", body["overall_mean_lph"])
-	assert.Equal(t, "98.49", body["du_percent"])
+
+	lowest := decimalField(t, body, "lowest_mean_lph")
+	assert.Equal(t, "9.8", lowest["decimal"])
+	assert.Equal(t, "49/5", lowest["exact_fraction"])
+	assert.Equal(t, true, lowest["terminating"])
+
+	overall := decimalField(t, body, "overall_mean_lph")
+	assert.Equal(t, "9.95", overall["decimal"])
+	assert.Equal(t, true, overall["terminating"])
+
+	du := decimalField(t, body, "du_percent")
+	assert.Equal(t, "98.49", du["rounded"])
 	assert.Equal(t, "pass", body["verdict"])
+
+	// The response must let the client recompute DU exactly from fractions:
+	// lowest/overall*100, rounded half up. Here 49/5 / 199/20 * 100 = 19600/199.
+	assert.Equal(t, "19600/199", du["exact_fraction"])
 }
 
 func TestVerifyReviewAndFailVerdicts(t *testing.T) {
@@ -76,12 +98,38 @@ func TestVerifyReviewAndFailVerdicts(t *testing.T) {
 
 	review := postJSON(t, r, validBody([]string{"8.5", "10", "10", "10"}))
 	require.Equal(t, http.StatusOK, review.Code, review.Body.String())
-	assert.Equal(t, "88.31", decodeBody(t, review)["du_percent"])
-	assert.Equal(t, "review", decodeBody(t, review)["verdict"])
+	reviewBody := decodeBody(t, review)
+	assert.Equal(t, "88.31", decimalField(t, reviewBody, "du_percent")["rounded"])
+	assert.Equal(t, "review", reviewBody["verdict"])
 
 	fail := postJSON(t, r, validBody([]string{"2", "10", "10", "10"}))
 	require.Equal(t, http.StatusOK, fail.Code, fail.Body.String())
 	assert.Equal(t, "fail", decodeBody(t, fail)["verdict"])
+}
+
+func TestVerifyRepeatingMeanIsExactlyRecomputable(t *testing.T) {
+	// n=7: one 99.999 and six 100.000 -> overall mean 699999/7000, a
+	// repeating decimal. The response must carry the exact fraction and flag
+	// the decimal rendering as non-terminating/approximate.
+	r := NewRouter()
+	w := postJSON(t, r, validBody(
+		[]string{"99.999", "100", "100", "100", "100", "100", "100"}))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := decodeBody(t, w)
+
+	overall := decimalField(t, body, "overall_mean_lph")
+	assert.Equal(t, "699999/7000", overall["exact_fraction"], "exact overall mean")
+	assert.Equal(t, "99.999857142857", overall["decimal"], "12-place preview")
+	assert.Equal(t, false, overall["terminating"])
+
+	lowest := decimalField(t, body, "lowest_mean_lph")
+	assert.Equal(t, "199999/2000", lowest["exact_fraction"])
+	assert.Equal(t, true, lowest["terminating"])
+
+	du := decimalField(t, body, "du_percent")
+	assert.Equal(t, "69999650/699999", du["exact_fraction"], "exact unrounded DU")
+	assert.Equal(t, "100.00", du["rounded"])
+	assert.Equal(t, "pass", body["verdict"])
 }
 
 func TestVerifyTiesKeepInputOrderEndToEnd(t *testing.T) {
@@ -236,4 +284,71 @@ func TestParseRejectsScientificNotation(t *testing.T) {
 	w := postJSON(t, r, `{"measurements":[{"id":"a","flow_lph":1e1},{"id":"b","flow_lph":10},{"id":"c","flow_lph":10},{"id":"d","flow_lph":10}]}`)
 	require.Equal(t, http.StatusUnprocessableEntity, w.Code, w.Body.String())
 	assert.Equal(t, "measurements[0].flow_lph", decodeBody(t, w)["error"].(map[string]any)["field"])
+}
+
+// parseFraction reads an "num/den" string from the response without importing
+// the domain package: this mirrors what an external acceptance tool can do.
+func parseFraction(t *testing.T, s string) *big.Rat {
+	t.Helper()
+	r, ok := new(big.Rat).SetString(s)
+	require.True(t, ok, "fraction %q", s)
+	return r
+}
+
+// roundHalfUpTwo recomputes ROUND_HALF_UP to two places purely from an exact
+// fraction, as an external auditor would from the JSON response.
+func roundHalfUpTwo(r *big.Rat) string {
+	scaled := new(big.Int).Mul(r.Num(), big.NewInt(100))
+	q, rem := new(big.Int), new(big.Int)
+	q.QuoRem(scaled, r.Denom(), rem)
+	if new(big.Int).Mul(rem, big.NewInt(2)).Cmp(r.Denom()) >= 0 {
+		q.Add(q, big.NewInt(1))
+	}
+	whole := new(big.Int).Quo(q, big.NewInt(100))
+	frac := new(big.Int).Mod(q, big.NewInt(100))
+	return whole.String() + "." + padTwo(frac.String())
+}
+
+func padTwo(s string) string {
+	for len(s) < 2 {
+		s = "0" + s
+	}
+	return s
+}
+
+// TestVerdictRecomputableFromResponseAlone proves a seven-point run whose
+// overall mean is a repeating decimal still yields a verdict the client can
+// reproduce exactly from the response's exact_fraction fields, with no access
+// to server internals.
+func TestVerdictRecomputableFromResponseAlone(t *testing.T) {
+	r := NewRouter()
+	w := postJSON(t, r, validBody(
+		[]string{"99.999", "100", "100", "100", "100", "100", "100"}))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := decodeBody(t, w)
+
+	lowest := parseFraction(t, decimalField(t, body, "lowest_mean_lph")["exact_fraction"].(string))
+	overall := parseFraction(t, decimalField(t, body, "overall_mean_lph")["exact_fraction"].(string))
+
+	// Independent recomputation of DU from the two exact mean fractions.
+	du := new(big.Rat).Quo(lowest, overall)
+	du.Mul(du, big.NewRat(100, 1))
+
+	// It must exactly equal the exact DU fraction the server reported.
+	servedDU := parseFraction(t, decimalField(t, body, "du_percent")["exact_fraction"].(string))
+	assert.Equal(t, 0, du.Cmp(servedDU))
+
+	// Rounding the independently computed fraction must reproduce du_percent.
+	assert.Equal(t, "100.00", roundHalfUpTwo(du))
+	assert.Equal(t, "100.00", decimalField(t, body, "du_percent")["rounded"])
+
+	// And the threshold rule applied to that value reproduces the verdict.
+	cents, _ := new(big.Int).SetString(strings.ReplaceAll(roundHalfUpTwo(du), ".", ""), 10)
+	wantVerdict := "fail"
+	if cents.Cmp(big.NewInt(9000)) >= 0 {
+		wantVerdict = "pass"
+	} else if cents.Cmp(big.NewInt(8000)) >= 0 {
+		wantVerdict = "review"
+	}
+	assert.Equal(t, wantVerdict, body["verdict"])
 }

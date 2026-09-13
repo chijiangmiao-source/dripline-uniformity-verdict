@@ -59,12 +59,12 @@ func TestLowestGroupPicksSmallestFlows(t *testing.T) {
 	lowestMean := new(big.Rat).Add(mustFlow(t, "8.500"), mustFlow(t, "8.600"))
 	lowestMean.Quo(lowestMean, big.NewRat(2, 1))
 	assert.Equal(t, 0, res.LowestMean.Cmp(lowestMean))
-	assert.Equal(t, "8.55", MeanString(res.LowestMean))
+	assert.Equal(t, "8.55", AsExactDecimal(res.LowestMean).Decimal)
 
 	// total = 9.000+8.500+8.600+9.500+10.000 = 45.600; mean = 45.6/5 = 9.12.
 	overall := big.NewRat(45600, 5000)
 	assert.Equal(t, 0, res.OverallMean.Cmp(overall))
-	assert.Equal(t, "9.12", MeanString(res.OverallMean))
+	assert.Equal(t, "9.12", AsExactDecimal(res.OverallMean).Decimal)
 }
 
 func TestTiesEnterLowestGroupInInputOrder(t *testing.T) {
@@ -187,12 +187,27 @@ func TestMeansAreNotRoundedBeforeDU(t *testing.T) {
 	assert.Equal(t, "100.00", res.DURounded)
 
 	// Transport rendering: terminating decimals are exact; the repeating one
-	// is shown at 12 places but never feeds back into DU.
-	assert.Equal(t, "99.9995", MeanString(res.LowestMean))
-	assert.Equal(t, "99.999857142857", MeanString(res.OverallMean))
+	// carries an exact fraction plus a 12-place approximate preview, and is
+	// explicitly flagged as non-terminating so it cannot be mistaken for the
+	// authoritative value.
+	lowestView := AsExactDecimal(res.LowestMean)
+	assert.Equal(t, "199999/2000", lowestView.Fraction)
+	assert.Equal(t, "99.9995", lowestView.Decimal)
+	assert.True(t, lowestView.Terminating)
+
+	overallView := AsExactDecimal(res.OverallMean)
+	assert.Equal(t, "699999/7000", overallView.Fraction)
+	assert.Equal(t, "99.999857142857", overallView.Decimal)
+	assert.False(t, overallView.Terminating)
+
+	// The verdict is fully recomputable from the exact fractions alone:
+	// DU = lowest/overall * 100, rounded half up to two places.
+	recomputed := new(big.Rat).Quo(res.LowestMean, res.OverallMean)
+	recomputed.Mul(recomputed, big.NewRat(100, 1))
+	assert.Equal(t, 0, recomputed.Cmp(res.DU))
 }
 
-func TestMeanStringExactFiniteDecimals(t *testing.T) {
+func TestAsExactDecimalFiniteDecimals(t *testing.T) {
 	cases := map[string]string{
 		"1/4":    "0.25",
 		"4001/4": "1000.25",
@@ -204,6 +219,24 @@ func TestMeanStringExactFiniteDecimals(t *testing.T) {
 	for frac, want := range cases {
 		r, ok := new(big.Rat).SetString(frac)
 		require.True(t, ok)
-		assert.Equal(t, want, MeanString(r), frac)
+		view := AsExactDecimal(r)
+		assert.Equal(t, want, view.Decimal, frac)
+		assert.True(t, view.Terminating, frac)
+		assert.Equal(t, r.Num().String()+"/"+r.Denom().String(), view.Fraction, frac)
 	}
+}
+
+func TestAsExactDecimalRepeatingCarriesExactFraction(t *testing.T) {
+	r, ok := new(big.Rat).SetString("699999/7000")
+	require.True(t, ok)
+	view := AsExactDecimal(r)
+	assert.False(t, view.Terminating)
+	assert.Equal(t, "699999/7000", view.Fraction, "fraction is the authoritative exact value")
+	assert.Equal(t, "99.999857142857", view.Decimal, "12-place preview only")
+
+	// 1/3 is a pure repeating decimal; the fraction must round-trip exactly.
+	third := AsExactDecimal(big.NewRat(1, 3))
+	assert.False(t, third.Terminating)
+	assert.Equal(t, "1/3", third.Fraction)
+	assert.Equal(t, "0.333333333333", third.Decimal)
 }

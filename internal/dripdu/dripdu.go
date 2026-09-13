@@ -133,17 +133,32 @@ func roundHalfUpScaled(r *big.Rat, places uint) *big.Int {
 	return q
 }
 
-// MeanString renders an exact mean for the API response. Means of decimal
-// inputs with a denominator containing only factors 2 and 5 are emitted as
-// exact finite decimals (no rounding at all). A mean whose denominator has
-// other prime factors has no finite decimal expansion; it is shown with 12
-// decimal places using ROUND_HALF_UP for transport only. The DU value is
-// always computed from the exact fraction, never from this rendering.
-func MeanString(r *big.Rat) string {
-	if s, ok := exactDecimal(r); ok {
-		return s
+// ExactDecimal is an API-facing view of an exact rational value. Fraction is
+// the canonical "num/den" form and always carries the full precision; Decimal
+// is shown for convenience and is itself exact only when Terminating is true
+// (the reduced denominator has no prime factors other than 2 and 5). When
+// Terminating is false, Decimal is a 12-place ROUND_HALF_UP preview and the
+// fraction must be used to recompute any result exactly.
+type ExactDecimal struct {
+	Fraction    string
+	Decimal     string
+	Terminating bool
+}
+
+// AsExactDecimal renders an exact rational value for transport. The DU value
+// must always be computed from the *big.Rat itself, never from Decimal.
+func AsExactDecimal(r *big.Rat) ExactDecimal {
+	view := ExactDecimal{
+		Fraction: r.Num().String() + "/" + r.Denom().String(),
 	}
-	return roundedDecimal(r, 12)
+	if s, ok := exactDecimal(r); ok {
+		view.Decimal = s
+		view.Terminating = true
+	} else {
+		view.Decimal = roundedDecimal(r, 12)
+		view.Terminating = false
+	}
+	return view
 }
 
 // exactDecimal returns the exact finite decimal form of r, or ok=false if the
