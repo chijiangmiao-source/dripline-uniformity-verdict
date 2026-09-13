@@ -7,6 +7,10 @@
 单次验收之后，还可提交 3～10 轮复测做**波动分析**：按测点求各轮中位数与极差占比，
 以最大波动百分比给出整条支路的稳定性结论，避免偶发读数掩盖间歇性堵塞。
 
+单次验收之后，还可提交同一份 `measurements` 做**堵塞区段诊断**：以全部测点的精确中位数
+为基准，把低于基准 85% 的测点沿安装顺序合并成连续区段，维护人员据此直接获得应优先巡检
+的连续测点，而不是逐个排查分散的低流量点。
+
 - 语言/框架：Go 1.25 + Gin
 - 精确运算：`math/big.Rat`，全程不经过 `float64`
 - 编排：Docker Compose，常驻服务 `api` + 一次性验收服务 `verify`
@@ -339,6 +343,79 @@ curl -X POST http://localhost:8080/api/v1/stability \
 首轮测点（或出现首轮没有的 id）时，定位到该轮的 `measurements` 并在消息中指名
 缺失/多余的具体 id。请求体不是合法 JSON 对象时返回 400。
 
+### `POST /api/v1/blockage-diagnosis`
+
+单次验收之后，工程师提交与裁决接口**完全相同的 `measurements` 结构**（同样的 id、
+`flow_lph` 与可选 `rated_flow_lph` 规则，4～64 点），服务沿支路安装顺序（即输入顺序）
+定位集中低流量区域。计算规则（全程精确分数，不经过浮点）：
+
+1. 诊断值：省略 `rated_flow_lph` 时取实测流量；每个测点都带额定流量时取
+   **供给比 = 实测流量 ÷ 额定流量**（混用返回 422，规则同裁决接口）；
+2. 取全部诊断值的**精确中位数**作为基准（偶数点时为中间两值的均值）；
+3. 诊断值**严格低于**中位数 85% 的测点标记为疑似低流量（恰好等于 85.00% 不算）；
+4. 沿输入顺序把**相邻的疑似测点合并**为区段：区段以输入顺序出现，疑似点之间隔着
+   正常点则形成不同区段；无疑似点时返回空区段数组，同时仍返回全部测点结果。
+
+```bash
+curl -X POST http://localhost:8080/api/v1/blockage-diagnosis \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "measurements": [
+      {"id":"S-01","flow_lph":8},   {"id":"S-02","flow_lph":8},
+      {"id":"S-03","flow_lph":10},  {"id":"S-04","flow_lph":10},
+      {"id":"S-05","flow_lph":10},  {"id":"S-06","flow_lph":10},
+      {"id":"S-07","flow_lph":10},  {"id":"S-08","flow_lph":7},
+      {"id":"S-09","flow_lph":7}
+    ]
+  }'
+```
+
+中位数为 10（阈值 8.5）：`S-01/S-02` 与 `S-08/S-09` 分别构成两段（HTTP 200）：
+
+```json
+{
+  "sample_count": 9,
+  "median": {"decimal": "10", "exact_fraction": "10/1", "terminating": true},
+  "points": [
+    {"id": "S-01", "baseline_percent": {"rounded": "80.00", "exact_fraction": "80/1"}, "suspected_low_flow": true},
+    {"id": "S-02", "baseline_percent": {"rounded": "80.00", "exact_fraction": "80/1"}, "suspected_low_flow": true},
+    {"id": "S-03", "baseline_percent": {"rounded": "100.00", "exact_fraction": "100/1"}, "suspected_low_flow": false}
+  ],
+  "sections": [
+    {"start_id": "S-01", "end_id": "S-02", "member_ids": ["S-01", "S-02"]},
+    {"start_id": "S-08", "end_id": "S-09", "member_ids": ["S-08", "S-09"]}
+  ]
+}
+```
+
+（上方 `points` 仅节选前三点，实际返回全部 9 点且顺序与请求一致。）
+
+字段说明：
+
+| 字段 | 含义 |
+|---|---|
+| `sample_count` | 样本数 n |
+| `median` | 全部诊断值的精确中位数（`decimal` / `exact_fraction` / `terminating` 契约同裁决接口；供给比中位数可能写不尽，此时 `decimal` 为 12 位 ROUND_HALF_UP 预览） |
+| `points[].id` | 测点 id，按输入顺序列出 |
+| `points[].baseline_percent` | 该点诊断值 ÷ 中位数 × 100 的**精确基准占比**：`exact_fraction` 为权威精确值，`rounded` 为两位 ROUND_HALF_UP 展示 |
+| `points[].suspected_low_flow` | 是否严格低于中位数的 85% |
+| `sections[].start_id` / `end_id` | 每段在输入顺序上的首、末测点 id |
+| `sections[].member_ids` | 该段全部疑似测点 id（连续、按输入顺序） |
+| `sections` | 无疑似点时为 `[]`（空数组，不是 `null`） |
+| `calculation_basis` | 额定模式固定为 `"supply_ratio"`；省略额定流量的旧请求不出现该字段 |
+
+仅凭响应即可复算：`诊断值 ÷ median.exact_fraction × 100` 应等于该点
+`baseline_percent.exact_fraction`，结果严格小于 85 的点标记为疑似，再沿输入顺序合并
+相邻疑似点即得 `sections`。
+
+额定模式改变区段：同一组实测流量，加上 `rated_flow_lph` 后诊断改用供给比，相对供水
+最不足的测点（而非实测流量最低者）进入区段，响应增加 `"calculation_basis":
+"supply_ratio"`，其余字段不变。
+
+错误响应与裁决接口同一信封：字段非法、`rated_flow_lph` 混用、数量越界均返回
+**HTTP 422** 并定位**首个**出错字段路径（如 `measurements[2].rated_flow_lph`），
+**不输出任何部分区段或测点结果**；请求体不是合法 JSON 对象时返回 400。
+
 ### 健康检查
 
 `GET /healthz` → `200 {"status":"ok"}`
@@ -437,13 +514,16 @@ DU 精确等于 `90.005 / 89.995 / 90.00 / 80.00 / 79.99` 时的 ROUND_HALF_UP �
 展示舍入不改变结论（精确 5.0025% 判为关注）、并列最差测点取首轮顺序最前者、
 后续轮次乱序按 id 匹配且报告保持首轮顺序、第二轮缺失首轮测点/混入外来 id 的
 精确定位，以及轮次与测点数量边界。
+堵塞区段诊断另覆盖：无堵塞时空区段与全部测点结果、单段相邻合并、两段定位、
+奇/偶数点精确中位数、恰好 85% 不标记而 84.99% 标记、非有限小数供给比中位数的
+精确分数复算、额定模式改变区段，以及非法/混用 `rated_flow_lph` 的准确字段路径。
 
 ## 目录结构
 
 ```
 cmd/api/            常驻 HTTP 服务入口（读取 API_PORT）
 cmd/verify/         一次性验收客户端入口
-internal/dripdu/    十进制解析、精确 DU 计算与裁决、复测波动分析（核心领域逻辑）
+internal/dripdu/    十进制解析、精确 DU 计算与裁决、复测波动分析、堵塞区段诊断（核心领域逻辑）
 internal/httpapi/   Gin 路由、请求校验（首个字段路径）、响应
 internal/verifyclient/ 一次性验收的等待就绪、调用与退出码映射
 examples/           通过/复查/不通过三份请求示例
