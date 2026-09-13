@@ -1,0 +1,9 @@
+.git
+.gitignore
+*.md
+*.test
+*.out
+bin/
+dist/
+tmp/
+/data/

@@ -1,0 +1,10 @@
+# Compiled binaries / local artifacts
+/bin/
+/dist/
+*.test
+*.out
+coverage.html
+
+# OS/editor noise
+.DS_Store
+*.swp

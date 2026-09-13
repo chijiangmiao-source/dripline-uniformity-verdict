@@ -1,0 +1,12 @@
+{
+  "measurements": [
+    {"id": "B-01", "flow_lph": 9.95},
+    {"id": "B-02", "flow_lph": 10.01},
+    {"id": "B-03", "flow_lph": 8.00},
+    {"id": "B-04", "flow_lph": 9.98},
+    {"id": "B-05", "flow_lph": 9.92},
+    {"id": "B-06", "flow_lph": 10.02},
+    {"id": "B-07", "flow_lph": 10.00},
+    {"id": "B-08", "flow_lph": 8.40}
+  ]
+}
