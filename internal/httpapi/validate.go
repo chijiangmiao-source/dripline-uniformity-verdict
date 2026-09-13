@@ -69,7 +69,8 @@ func parseRequest(body []byte) (verifyRequest, *validationError) {
 
 	seenIDs := make(map[string]struct{}, n)
 	points := make([]dripdu.Measurement, 0, n)
-	ratedMode := false // whether the first measurement carries rated_flow_lph
+	anyRated := false
+	firstMissingRated := -1
 
 	for i, raw := range rawList {
 		itemPath := fmt.Sprintf("measurements[%d]", i)
@@ -96,19 +97,23 @@ func parseRequest(body []byte) (verifyRequest, *validationError) {
 		if verr != nil {
 			return verifyRequest{}, verr
 		}
-		if i == 0 {
-			ratedMode = hasRated
-		} else if hasRated != ratedMode {
-			// rated_flow_lph is all-or-nothing across one request; the first
-			// measurement set the expectation, so this item is the first
-			// offender either way.
-			return verifyRequest{}, &validationError{
-				Field:   itemPath + ".rated_flow_lph",
-				Message: "rated_flow_lph must be provided for every measurement or omitted for all",
-			}
+		if hasRated {
+			anyRated = true
+		} else if firstMissingRated < 0 {
+			firstMissingRated = i
 		}
 
 		points = append(points, dripdu.Measurement{ID: id, Flow: flow, Rated: rated})
+	}
+
+	// rated_flow_lph is all-or-nothing across one request. In a mixed
+	// request the points without the field are the omissions, so the error
+	// locates the first of them — never a point that duly carried it.
+	if anyRated && firstMissingRated >= 0 {
+		return verifyRequest{}, &validationError{
+			Field:   fmt.Sprintf("measurements[%d].rated_flow_lph", firstMissingRated),
+			Message: "rated_flow_lph must be provided for every measurement or omitted for all",
+		}
 	}
 
 	return verifyRequest{Measurements: points}, nil

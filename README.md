@@ -220,13 +220,26 @@ HTTP/1.1 422 Unprocessable Entity
 
 字段路径形如 `measurements`、`measurements[2].id`、`measurements[3].flow_lph`、
 `measurements[1].rated_flow_lph`。`rated_flow_lph` 只在一部分测点出现时（混用），
-同样返回 422 并定位首个违反"全有或全无"规则的测点，例如：
+同样返回 422，并定位**首个漏填该字段的测点**——例如首个测点未填而后续测点已填：
 
+```bash
+curl -i -X POST http://localhost:8080/api/v1/verify \
+  -H 'Content-Type: application/json' \
+  -d '{"measurements":[
+        {"id":"A","flow_lph":10},
+        {"id":"B","flow_lph":10,"rated_flow_lph":8},
+        {"id":"C","flow_lph":10,"rated_flow_lph":8},
+        {"id":"D","flow_lph":10,"rated_flow_lph":8}]}'
+```
+
+```
+HTTP/1.1 422 Unprocessable Entity
+```
 ```json
 {
   "error": {
     "message": "rated_flow_lph must be provided for every measurement or omitted for all",
-    "field": "measurements[1].rated_flow_lph"
+    "field": "measurements[0].rated_flow_lph"
   }
 }
 ```

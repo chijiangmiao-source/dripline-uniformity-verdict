@@ -167,14 +167,19 @@ func TestRatedModeMixedPresenceLocated(t *testing.T) {
 		wantField string
 	}{
 		{
+			name:      "first point missing rated",
+			body:      `{"measurements":[{"id":"a","flow_lph":10},{"id":"b","flow_lph":10,"rated_flow_lph":8},{"id":"c","flow_lph":10,"rated_flow_lph":8},{"id":"d","flow_lph":10,"rated_flow_lph":8}]}`,
+			wantField: "measurements[0].rated_flow_lph",
+		},
+		{
 			name:      "second point missing rated",
 			body:      `{"measurements":[{"id":"a","flow_lph":10,"rated_flow_lph":8},{"id":"b","flow_lph":10},{"id":"c","flow_lph":10},{"id":"d","flow_lph":10}]}`,
 			wantField: "measurements[1].rated_flow_lph",
 		},
 		{
-			name:      "only one point rated",
+			name:      "only middle point rated",
 			body:      `{"measurements":[{"id":"a","flow_lph":10},{"id":"b","flow_lph":10,"rated_flow_lph":8},{"id":"c","flow_lph":10},{"id":"d","flow_lph":10}]}`,
-			wantField: "measurements[1].rated_flow_lph",
+			wantField: "measurements[0].rated_flow_lph",
 		},
 		{
 			name:      "last point missing rated",
@@ -187,7 +192,7 @@ func TestRatedModeMixedPresenceLocated(t *testing.T) {
 			w := postJSON(t, r, tc.body)
 			require.Equal(t, http.StatusUnprocessableEntity, w.Code, w.Body.String())
 			errBody := decodeBody(t, w)["error"].(map[string]any)
-			assert.Equal(t, tc.wantField, errBody["field"])
+			assert.Equal(t, tc.wantField, errBody["field"], "the error must locate the first point that omitted rated_flow_lph")
 			assert.Contains(t, errBody["message"], "rated_flow_lph")
 			// A rejected request produces no adjudication at all.
 			full := decodeBody(t, w)
