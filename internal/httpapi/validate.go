@@ -27,6 +27,9 @@ func syntaxError(message string) *validationError {
 // verifyRequest is the accepted request shape:
 //
 //	{ "measurements": [ {"id": "p1", "flow_lph": 12.34}, ... ] }
+//
+// Every measurement may additionally carry "rated_flow_lph"; the field must
+// be present on all measurements or on none.
 type verifyRequest struct {
 	Measurements []dripdu.Measurement
 }
@@ -66,6 +69,7 @@ func parseRequest(body []byte) (verifyRequest, *validationError) {
 
 	seenIDs := make(map[string]struct{}, n)
 	points := make([]dripdu.Measurement, 0, n)
+	ratedMode := false // whether the first measurement carries rated_flow_lph
 
 	for i, raw := range rawList {
 		itemPath := fmt.Sprintf("measurements[%d]", i)
@@ -88,7 +92,23 @@ func parseRequest(body []byte) (verifyRequest, *validationError) {
 			return verifyRequest{}, verr
 		}
 
-		points = append(points, dripdu.Measurement{ID: id, Flow: flow})
+		rated, hasRated, verr := parseRatedFlowField(fields, itemPath+".rated_flow_lph")
+		if verr != nil {
+			return verifyRequest{}, verr
+		}
+		if i == 0 {
+			ratedMode = hasRated
+		} else if hasRated != ratedMode {
+			// rated_flow_lph is all-or-nothing across one request; the first
+			// measurement set the expectation, so this item is the first
+			// offender either way.
+			return verifyRequest{}, &validationError{
+				Field:   itemPath + ".rated_flow_lph",
+				Message: "rated_flow_lph must be provided for every measurement or omitted for all",
+			}
+		}
+
+		points = append(points, dripdu.Measurement{ID: id, Flow: flow, Rated: rated})
 	}
 
 	return verifyRequest{Measurements: points}, nil
@@ -133,6 +153,30 @@ func parseFlowField(raw json.RawMessage, path string) (*big.Rat, *validationErro
 		return nil, &validationError{Field: path, Message: err.Error()}
 	}
 	return flow, nil
+}
+
+// parseRatedFlowField validates the optional rated_flow_lph of one
+// measurement. It reports whether the key was present at all so the caller
+// can enforce the all-or-nothing rule across the request.
+func parseRatedFlowField(fields map[string]json.RawMessage, path string) (*big.Rat, bool, *validationError) {
+	raw, present := fields["rated_flow_lph"]
+	if !present {
+		return nil, false, nil
+	}
+	token := strings.TrimSpace(string(raw))
+	if token == "" || token == "null" {
+		return nil, false, &validationError{Field: path, Message: "rated_flow_lph must be a JSON number"}
+	}
+	// Same gate as flow_lph: only bare number literals reach decimal
+	// parsing; everything else is a type error.
+	if !isNumericLiteral(token) {
+		return nil, false, &validationError{Field: path, Message: "rated_flow_lph must be a JSON number"}
+	}
+	rated, err := dripdu.ParseRatedFlow(token)
+	if err != nil {
+		return nil, false, &validationError{Field: path, Message: err.Error()}
+	}
+	return rated, true, nil
 }
 
 // isNumericLiteral reports whether s has the shape of a JSON number token

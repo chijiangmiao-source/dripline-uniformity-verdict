@@ -1,0 +1,12 @@
+{
+  "measurements": [
+    {"id": "R-01", "flow_lph": 7.82, "rated_flow_lph": 8},
+    {"id": "R-02", "flow_lph": 15.90, "rated_flow_lph": 16},
+    {"id": "R-03", "flow_lph": 7.95, "rated_flow_lph": 8},
+    {"id": "R-04", "flow_lph": 15.20, "rated_flow_lph": 16},
+    {"id": "R-05", "flow_lph": 8.02, "rated_flow_lph": 8},
+    {"id": "R-06", "flow_lph": 16.10, "rated_flow_lph": 16},
+    {"id": "R-07", "flow_lph": 6.10, "rated_flow_lph": 8},
+    {"id": "R-08", "flow_lph": 15.95, "rated_flow_lph": 16}
+  ]
+}

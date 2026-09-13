@@ -30,74 +30,144 @@ const (
 type Measurement struct {
 	ID   string
 	Flow *big.Rat // flow in litres per hour, strictly greater than 0 and at most 100
+	// Rated is the emitter's rated flow in litres per hour, or nil when the
+	// request omitted rated_flow_lph. Within one evaluation either every
+	// point carries a rated flow or none does; the API layer rejects mixed
+	// requests before they reach this package.
+	Rated *big.Rat
 }
+
+// CalculationBasis names the quantity the lowest group, the means and DU
+// were computed from.
+type CalculationBasis string
+
+const (
+	// BasisMeasuredFlow ranks points by their measured flow (requests
+	// without rated_flow_lph).
+	BasisMeasuredFlow CalculationBasis = "measured_flow"
+	// BasisSupplyRatio ranks points by the ratio of measured flow to rated
+	// flow (requests with rated_flow_lph on every point).
+	BasisSupplyRatio CalculationBasis = "supply_ratio"
+)
 
 // Result is the fully recomputable adjudication of one acceptance request.
 type Result struct {
 	SampleCount int
 	LowestCount int
-	// LowestIDs are the lowest-group point ids, ordered by ascending flow and
-	// then by input position, so ties enter the group in input order.
-	LowestIDs   []string
+	// LowestIDs are the lowest-group point ids, ordered by the ranked
+	// quantity and then by input position, so ties enter the group in input
+	// order.
+	LowestIDs []string
+	// LowestMean and OverallMean are the means of the measured flows (of
+	// the lowest group and of all points), regardless of Basis.
 	LowestMean  *big.Rat
 	OverallMean *big.Rat
 	// DU is the exact distribution uniformity in percent (lowest mean /
-	// overall mean * 100), carried without prior rounding.
+	// overall mean * 100 over the ranked quantity), carried without prior
+	// rounding.
 	DU *big.Rat
 	// DURounded is DU rounded with decimal ROUND_HALF_UP to two places,
 	// always rendered with exactly two digits after the decimal point.
 	DURounded string
 	Verdict   Verdict
+	// Basis reports whether the lowest group and DU were computed from
+	// measured flows or from supply ratios.
+	Basis CalculationBasis
+	// LowestMeanRatio and OverallMeanRatio are the exact means of the
+	// per-point supply ratios (Flow/Rated) for the lowest group and for all
+	// points. Both are nil unless Basis is BasisSupplyRatio.
+	LowestMeanRatio  *big.Rat
+	OverallMeanRatio *big.Rat
 }
 
 // Evaluate adjudicates a set of 4..64 validated measurements.
 func Evaluate(points []Measurement) Result {
 	n := len(points)
 
-	// ceil(n/4): size of the lowest-flow quarter.
+	// ceil(n/4): size of the lowest quarter.
 	k := (n + 3) / 4
 
-	// Stable ordering keeps equal flows in input order, satisfying the rule
-	// that tied lowest values enter the lowest group in input sequence.
+	// Rated mode applies only when every point carries a rated flow; mixed
+	// requests are rejected during request validation.
+	rated := true
+	for _, p := range points {
+		if p.Rated == nil {
+			rated = false
+			break
+		}
+	}
+
+	// ranked is the quantity points are ordered and averaged by: the supply
+	// ratio Flow/Rated in rated mode, the measured flow otherwise.
+	ranked := make([]*big.Rat, n)
+	for i, p := range points {
+		if rated {
+			ranked[i] = new(big.Rat).Quo(p.Flow, p.Rated)
+		} else {
+			ranked[i] = p.Flow
+		}
+	}
+
+	// Stable ordering keeps equal ranked values in input order, satisfying
+	// the rule that tied lowest values enter the lowest group in input
+	// sequence.
 	order := make([]int, n)
 	for i := range order {
 		order[i] = i
 	}
 	sort.SliceStable(order, func(a, b int) bool {
-		return points[order[a]].Flow.Cmp(points[order[b]].Flow) < 0
+		return ranked[order[a]].Cmp(ranked[order[b]]) < 0
 	})
 	lowest := order[:k]
 
 	total := new(big.Rat)
-	for _, p := range points {
+	rankedTotal := new(big.Rat)
+	for i, p := range points {
 		total.Add(total, p.Flow)
+		rankedTotal.Add(rankedTotal, ranked[i])
 	}
 	lowestSum := new(big.Rat)
+	lowestRankedSum := new(big.Rat)
 	ids := make([]string, 0, k)
 	for _, idx := range lowest {
 		lowestSum.Add(lowestSum, points[idx].Flow)
+		lowestRankedSum.Add(lowestRankedSum, ranked[idx])
 		ids = append(ids, points[idx].ID)
 	}
 
-	lowestMean := new(big.Rat).SetFrac(big.NewInt(1), big.NewInt(1))
-	lowestMean.Quo(lowestSum, big.NewRat(int64(k), 1))
+	lowestMean := new(big.Rat).Quo(lowestSum, big.NewRat(int64(k), 1))
 	overallMean := new(big.Rat).Quo(total, big.NewRat(int64(n), 1))
 
-	// DU = lowest mean / overall mean * 100, kept as an exact fraction.
-	du := new(big.Rat).Quo(lowestMean, overallMean)
+	// DU = lowest mean / overall mean * 100 over the ranked quantity, kept
+	// as an exact fraction.
+	basis := BasisMeasuredFlow
+	var lowestMeanRatio, overallMeanRatio *big.Rat
+	lowestRanked := lowestMean
+	overallRanked := overallMean
+	if rated {
+		basis = BasisSupplyRatio
+		lowestMeanRatio = new(big.Rat).Quo(lowestRankedSum, big.NewRat(int64(k), 1))
+		overallMeanRatio = new(big.Rat).Quo(rankedTotal, big.NewRat(int64(n), 1))
+		lowestRanked = lowestMeanRatio
+		overallRanked = overallMeanRatio
+	}
+	du := new(big.Rat).Quo(lowestRanked, overallRanked)
 	du.Mul(du, big.NewRat(100, 1))
 
 	cents := roundHalfUpScaled(du, 2)
 
 	return Result{
-		SampleCount: n,
-		LowestCount: k,
-		LowestIDs:   ids,
-		LowestMean:  lowestMean,
-		OverallMean: overallMean,
-		DU:          du,
-		DURounded:   formatScaled(cents, 2),
-		Verdict:     verdictFromCents(cents),
+		SampleCount:      n,
+		LowestCount:      k,
+		LowestIDs:        ids,
+		LowestMean:       lowestMean,
+		OverallMean:      overallMean,
+		DU:               du,
+		DURounded:        formatScaled(cents, 2),
+		Verdict:          verdictFromCents(cents),
+		Basis:            basis,
+		LowestMeanRatio:  lowestMeanRatio,
+		OverallMeanRatio: overallMeanRatio,
 	}
 }
 

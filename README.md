@@ -37,6 +37,29 @@
 - 每项 `id` 为**非空且唯一**的字符串；
 - `flow_lph` 为 JSON 数字，普通十进制、最多三位小数，且 `0 < flow_lph <= 100`
   （拒绝科学计数法、字符串、前导零写法如 `01`、超过三位小数等）。
+- `rated_flow_lph`（可选）为滴头额定流量，规则与 `flow_lph` 完全相同；
+  **一次请求中必须全部测点提供或全部省略**，混用返回 422。
+
+### 额定流量模式（混装不同额定流量滴头）
+
+同一支路混装不同额定流量的滴头时，实测流量最低的测点未必是相对供水最不足的。
+为每个测点补充 `rated_flow_lph` 后，验收改按**供给比 = 实测流量 ÷ 额定流量**裁决：
+
+1. 每个测点以精确分数计算供给比（不经过浮点）；
+2. 按供给比**升序**稳定排序，取前 `ceil(n/4)` 项为最低组（并列仍按输入次序）；
+3. `DU = 低组供给比均值 ÷ 总体供给比均值 × 100`，最终舍入与三档阈值与上文一致。
+
+额定模式下响应**保留全部原字段**（`lowest_mean_lph` / `overall_mean_lph` 仍为实测
+流量均值，其中最低组由供给比选出），并增加三个字段：
+
+| 字段 | 含义 |
+|---|---|
+| `calculation_basis` | 裁决依据，额定模式固定为 `"supply_ratio"` |
+| `lowest_mean_ratio` | 最低组供给比均值（`decimal` / `exact_fraction` / `terminating` 契约同上） |
+| `overall_mean_ratio` | 全体供给比均值，同上 |
+
+省略 `rated_flow_lph` 的旧请求走实测流量模式，响应字段与历史版本**完全一致**
+（不出现上述三个字段）。
 
 ---
 
@@ -132,6 +155,42 @@ DU = (199999/2000) ÷ (699999/7000) × 100 = 69999650/699999
 可见 `overall_mean_lph.decimal` 的 12 位只是展示，真正参与复算的是
 `exact_fraction`，因此临界支路不会因均值被截断而产生二义结论。
 
+### 额定模式请求与响应
+
+```bash
+curl -X POST http://localhost:8080/api/v1/verify \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "measurements": [
+      {"id": "R-01", "flow_lph": 8,    "rated_flow_lph": 8},
+      {"id": "R-02", "flow_lph": 9,    "rated_flow_lph": 18},
+      {"id": "R-03", "flow_lph": 10,   "rated_flow_lph": 10},
+      {"id": "R-04", "flow_lph": 10,   "rated_flow_lph": 10}
+    ]
+  }'
+```
+
+`R-02` 实测流量（9）并非最低，但供给比 `9/18 = 0.5` 最低，进入最低组：
+
+```json
+{
+  "sample_count": 4,
+  "lowest_count": 1,
+  "lowest_ids": ["R-02"],
+  "lowest_mean_lph": {"decimal": "9", "exact_fraction": "9/1", "terminating": true},
+  "overall_mean_lph": {"decimal": "9.25", "exact_fraction": "37/4", "terminating": true},
+  "du_percent": {"rounded": "57.14", "exact_fraction": "400/7"},
+  "verdict": "fail",
+  "verdict_text": "不通过",
+  "calculation_basis": "supply_ratio",
+  "lowest_mean_ratio": {"decimal": "0.5", "exact_fraction": "1/2", "terminating": true},
+  "overall_mean_ratio": {"decimal": "0.875", "exact_fraction": "7/8", "terminating": true}
+}
+```
+
+额定模式下复算改用两个 `*_ratio` 的 `exact_fraction`：
+`DU = (1/2) ÷ (7/8) × 100 = 400/7 → 57.14 → fail`。
+
 ### 错误响应
 
 数量、id 或流量任一非法，返回 **HTTP 422**，并定位**首个**出错字段路径；整次请求
@@ -159,7 +218,19 @@ HTTP/1.1 422 Unprocessable Entity
 }
 ```
 
-字段路径形如 `measurements`、`measurements[2].id`、`measurements[3].flow_lph`。
+字段路径形如 `measurements`、`measurements[2].id`、`measurements[3].flow_lph`、
+`measurements[1].rated_flow_lph`。`rated_flow_lph` 只在一部分测点出现时（混用），
+同样返回 422 并定位首个违反"全有或全无"规则的测点，例如：
+
+```json
+{
+  "error": {
+    "message": "rated_flow_lph must be provided for every measurement or omitted for all",
+    "field": "measurements[1].rated_flow_lph"
+  }
+}
+```
+
 请求体不是合法 JSON 对象时返回 400。
 
 ### 健康检查
@@ -231,6 +302,9 @@ curl -s -X POST http://localhost:8080/api/v1/verify \
 # ... "du_percent": {"rounded":"66.64", ...}, "verdict":"fail","verdict_text":"不通过"
 ```
 
+另有 `acceptance-rated.json`：同一支路混装 8 与 16 LPH 两种额定滴头，
+按供给比裁决（`calculation_basis: "supply_ratio"`，DU 89.16 → 复查）。
+
 ---
 
 ## 4. 本地开发与测试
@@ -250,7 +324,9 @@ echo '{"measurements":[{"id":"a","flow_lph":2},{"id":"b","flow_lph":10},{"id":"c
 
 关键边界均被测试覆盖：`n=4/5/…/64` 的 `ceil(n/4)`、并列最低值按输入次序、
 DU 精确等于 `90.005 / 89.995 / 90.00 / 80.00 / 79.99` 时的 ROUND_HALF_UP 与档位归属、
-循环小数均值不提前舍入、非法数量/空 id/重复 id/越界与超精度流量的首个字段定位等。
+循环小数均值不提前舍入、非法数量/空 id/重复 id/越界与超精度流量的首个字段定位、
+额定模式下不同额定值改变最低组、并列供给比保持输入次序、循环供给比均值的精确复算、
+`rated_flow_lph` 混用与非法值的首个字段定位，以及旧样例响应逐字段不变。
 
 ## 目录结构
 

@@ -29,6 +29,11 @@ type duView struct {
 // numeric result includes its exact rational fraction, so the DU and verdict
 // can be recomputed from this document alone even when a mean is a repeating
 // decimal (e.g. seven measurements divided by 7).
+//
+// Requests that carry rated_flow_lph on every measurement are adjudicated on
+// the measured/rated supply ratio; the response then also reports
+// calculation_basis and the two ratio means. Legacy requests omit all three
+// fields, keeping the long-standing response shape byte-compatible.
 type verifyResponse struct {
 	SampleCount int         `json:"sample_count"`
 	LowestCount int         `json:"lowest_count"`
@@ -38,6 +43,10 @@ type verifyResponse struct {
 	DU          duView      `json:"du_percent"`
 	Verdict     string      `json:"verdict"`
 	VerdictText string      `json:"verdict_text"`
+	// Rated-mode additions, omitted entirely for legacy requests.
+	CalculationBasis string       `json:"calculation_basis,omitempty"`
+	LowestMeanRatio  *decimalView `json:"lowest_mean_ratio,omitempty"`
+	OverallMeanRatio *decimalView `json:"overall_mean_ratio,omitempty"`
 }
 
 // errorResponse is returned with 4xx/5xx statuses.
@@ -88,7 +97,7 @@ func handleVerify(c *gin.Context) {
 
 	result := dripdu.Evaluate(req.Measurements)
 
-	c.JSON(http.StatusOK, verifyResponse{
+	resp := verifyResponse{
 		SampleCount: result.SampleCount,
 		LowestCount: result.LowestCount,
 		LowestIDs:   result.LowestIDs,
@@ -100,7 +109,15 @@ func handleVerify(c *gin.Context) {
 		},
 		Verdict:     string(result.Verdict),
 		VerdictText: verdictText(result.Verdict),
-	})
+	}
+	if result.Basis == dripdu.BasisSupplyRatio {
+		resp.CalculationBasis = string(result.Basis)
+		lowestRatio := toDecimalView(result.LowestMeanRatio)
+		overallRatio := toDecimalView(result.OverallMeanRatio)
+		resp.LowestMeanRatio = &lowestRatio
+		resp.OverallMeanRatio = &overallRatio
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func toDecimalView(r *big.Rat) decimalView {

@@ -51,6 +51,35 @@ func TestParseFlowRejectsMalformedDecimals(t *testing.T) {
 	}
 }
 
+func TestParseRatedFlowMirrorsFlowRules(t *testing.T) {
+	// Same accepted form and range as flow_lph; only the error messages
+	// name the rated field.
+	for input, want := range map[string]string{
+		"8":     "8/1",
+		"2.5":   "5/2",
+		"100":   "100/1",
+		"0.001": "1/1000",
+		"16.25": "65/4",
+	} {
+		got, err := ParseRatedFlow(input)
+		require.NoError(t, err, input)
+		wantRat, ok := new(big.Rat).SetString(want)
+		require.True(t, ok)
+		assert.Equal(t, 0, got.Cmp(wantRat), "input %s", input)
+	}
+
+	for _, input := range []string{"0", "0.0", "100.001", "101"} {
+		_, err := ParseRatedFlow(input)
+		assert.ErrorIs(t, err, ErrRatedRange, "input %q", input)
+		assert.Contains(t, err.Error(), "rated_flow_lph", "input %q", input)
+	}
+	for _, input := range []string{"1.2345", "01", "1e2", "-1", ".5", "1."} {
+		_, err := ParseRatedFlow(input)
+		assert.ErrorIs(t, err, ErrRatedFormat, "input %q", input)
+		assert.Contains(t, err.Error(), "rated_flow_lph", "input %q", input)
+	}
+}
+
 func TestRoundHalfUpScaled(t *testing.T) {
 	cases := []struct {
 		frac   string
