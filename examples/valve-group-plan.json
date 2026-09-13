@@ -1,0 +1,11 @@
+{
+  "pump_capacity_lph": 100,
+  "emitters": [
+    {"id": "E-01", "design_flow_lph": 40},
+    {"id": "E-02", "design_flow_lph": 30},
+    {"id": "E-03", "design_flow_lph": 30},
+    {"id": "E-04", "design_flow_lph": 25},
+    {"id": "E-05", "design_flow_lph": 50},
+    {"id": "E-06", "design_flow_lph": 50}
+  ]
+}

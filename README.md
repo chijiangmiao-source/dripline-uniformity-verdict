@@ -11,6 +11,10 @@
 为基准，把低于基准 85% 的测点沿安装顺序合并成连续区段，维护人员据此直接获得应优先巡检
 的连续测点，而不是逐个排查分散的低流量点。
 
+温室扩建共用一台泵时，还可提交泵容量与 4～64 个有序滴头做**阀组规划**：按安装顺序把
+滴头装入连续阀组，使任一阀组的设计流量之和不超过泵的可用流量，并尽量减少阀组数量；
+每个阀组返回编号、成员、总设计流量与剩余容量，全部按精确十进制给出。
+
 - 语言/框架：Go 1.25 + Gin
 - 精确运算：`math/big.Rat`，全程不经过 `float64`
 - 编排：Docker Compose，常驻服务 `api` + 一次性验收服务 `verify`
@@ -421,6 +425,91 @@ curl -X POST http://localhost:8080/api/v1/blockage-diagnosis \
 **HTTP 422** 并定位**首个**出错字段路径（如 `measurements[2].rated_flow_lph`），
 **不输出任何部分区段或测点结果**；请求体不是合法 JSON 对象时返回 400。
 
+### `POST /api/v1/valve-group-plan`
+
+温室扩建共用一台泵时，工程师提交**泵容量**与 **4～64 个**按安装顺序排列的滴头，
+服务把滴头装入尽可能少的连续阀组。请求示例：
+
+```bash
+curl -X POST http://localhost:8080/api/v1/valve-group-plan \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "pump_capacity_lph": 100,
+    "emitters": [
+      {"id": "E-01", "design_flow_lph": 40},
+      {"id": "E-02", "design_flow_lph": 30},
+      {"id": "E-03", "design_flow_lph": 30},
+      {"id": "E-04", "design_flow_lph": 25},
+      {"id": "E-05", "design_flow_lph": 50},
+      {"id": "E-06", "design_flow_lph": 50}
+    ]
+  }'
+```
+
+输入约束：
+
+- `pump_capacity_lph` 为泵的可用流量：JSON 数字、普通十进制、最多三位小数且大于零
+  （拒绝科学计数法、字符串、前导零写法等，规则同 `flow_lph`，但**不设 100 上限**）；
+- `emitters` 长度 4～64，每项 `id` **非空且唯一**；
+- `design_flow_lph` 的数值规则与 `pump_capacity_lph` 完全相同；
+- **单个滴头超过泵容量**时任何分组都无法容纳，返回 422 并定位该点的
+  `design_flow_lph`（恰好等于容量不算超过）。
+
+分组规则（全程精确分数，不经过浮点）：按安装顺序逐点累加，**加入下一点将使当前组
+总量超过容量时结束当前组**、以该点开始新组；总量**恰好等于容量仍归入当前组**。
+由于每点都不超过容量，每组至少含一点，一趟贪心即得最少组数。
+
+成功响应（HTTP 200）：
+
+```json
+{
+  "pump_capacity_lph": {"decimal": "100", "exact_fraction": "100/1", "terminating": true},
+  "emitter_count": 6,
+  "group_count": 3,
+  "groups": [
+    {
+      "group_number": 1,
+      "member_ids": ["E-01", "E-02", "E-03"],
+      "total_design_flow_lph": {"decimal": "100", "exact_fraction": "100/1", "terminating": true},
+      "remaining_capacity_lph": {"decimal": "0", "exact_fraction": "0/1", "terminating": true}
+    },
+    {
+      "group_number": 2,
+      "member_ids": ["E-04", "E-05"],
+      "total_design_flow_lph": {"decimal": "75", "exact_fraction": "75/1", "terminating": true},
+      "remaining_capacity_lph": {"decimal": "25", "exact_fraction": "25/1", "terminating": true}
+    },
+    {
+      "group_number": 3,
+      "member_ids": ["E-06"],
+      "total_design_flow_lph": {"decimal": "50", "exact_fraction": "50/1", "terminating": true},
+      "remaining_capacity_lph": {"decimal": "50", "exact_fraction": "50/1", "terminating": true}
+    }
+  ]
+}
+```
+
+字段说明：
+
+| 字段 | 含义 |
+|---|---|
+| `pump_capacity_lph` | 泵容量回显（`decimal` / `exact_fraction` / `terminating` 契约同裁决接口） |
+| `emitter_count` / `group_count` | 滴头数 n（4～64）/ 阀组数 |
+| `groups[].group_number` | 阀组编号，从 1 起按安装顺序递增 |
+| `groups[].member_ids` | 该组滴头 id（连续、按安装顺序） |
+| `groups[].total_design_flow_lph` | 该组设计流量之和的精确值，永不超过容量 |
+| `groups[].remaining_capacity_lph` | 容量 − 组总量的精确值，恰饱和时为 `0` |
+
+各组流量均为最多三位小数的精确和，`terminating` 恒为 `true`。仅凭响应即可按输入
+顺序完整复算：从首点开始累加 `design_flow_lph`，超过 `pump_capacity_lph` 即结束当前组，
+逐组核对 `member_ids`、`total_design_flow_lph` 与 `remaining_capacity_lph`。
+
+错误响应与裁决接口同一信封：容量非法、数量越界、id 重复或非法、流量非法、单点超
+容量均返回 **HTTP 422** 并定位**首个**出错字段路径（如 `pump_capacity_lph`、
+`emitters`、`emitters[2].id`、`emitters[1].design_flow_lph`），**不输出任何部分
+分组**；根对象或滴头内**重复同名字段**（如两个 `pump_capacity_lph`）同样返回 422
+并定位到重复字段；请求体不是合法 JSON 对象时返回 400。
+
 ### 健康检查
 
 `GET /healthz` → `200 {"status":"ok"}`
@@ -493,6 +582,15 @@ curl -s -X POST http://localhost:8080/api/v1/verify \
 另有 `acceptance-rated.json`：同一支路混装 8 与 16 LPH 两种额定滴头，
 按供给比裁决（`calculation_basis: "supply_ratio"`，DU 89.16 → 复查）。
 
+`valve-group-plan.json` 是阀组规划示例：泵容量 100 LPH、6 个滴头，
+规划为 3 个阀组（100 / 75 / 50 LPH）：
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/valve-group-plan \
+  -H 'Content-Type: application/json' \
+  --data @examples/valve-group-plan.json
+```
+
 ---
 
 ## 4. 本地开发与测试
@@ -523,13 +621,17 @@ DU 精确等于 `90.005 / 89.995 / 90.00 / 80.00 / 79.99` 时的 ROUND_HALF_UP �
 堵塞区段诊断另覆盖：无堵塞时空区段与全部测点结果、单段相邻合并、两段定位、
 奇/偶数点精确中位数、恰好 85% 不标记而 84.99% 标记、非有限小数供给比中位数的
 精确分数复算、额定模式改变区段，以及非法/混用 `rated_flow_lph` 的准确字段路径。
+阀组规划另覆盖：单组方案、恰好饱和仍归当前组、临界容量下的确定分组、三位小数
+精确求和与剩余容量、每点各自成组、最少组数、单点超容量的字段定位、滴头恰好等于
+容量、4/64 数量边界、重复 `pump_capacity_lph` 与滴头内重复字段的拒绝与定位，
+以及容量/流量的非法值首个字段定位。
 
 ## 目录结构
 
 ```
 cmd/api/            常驻 HTTP 服务入口（读取 API_PORT）
 cmd/verify/         一次性验收客户端入口
-internal/dripdu/    十进制解析、精确 DU 计算与裁决、复测波动分析、堵塞区段诊断（核心领域逻辑）
+internal/dripdu/    十进制解析、精确 DU 计算与裁决、复测波动分析、堵塞区段诊断、阀组规划（核心领域逻辑）
 internal/httpapi/   Gin 路由、请求校验（首个字段路径）、响应
 internal/verifyclient/ 一次性验收的等待就绪、调用与退出码映射
 examples/           通过/复查/不通过三份请求示例

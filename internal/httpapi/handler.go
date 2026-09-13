@@ -70,6 +70,7 @@ func NewRouter() *gin.Engine {
 	r.POST("/api/v1/verify", handleVerify)
 	r.POST("/api/v1/stability", handleStability)
 	r.POST("/api/v1/blockage-diagnosis", handleBlockageDiagnosis)
+	r.POST("/api/v1/valve-group-plan", handleValveGroupPlan)
 	return r
 }
 
